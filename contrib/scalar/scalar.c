@@ -7,6 +7,8 @@
 #include "parse-options.h"
 #include "config.h"
 #include "run-command.h"
+#include "simple-ipc.h"
+#include "fsmonitor-ipc.h"
 #include "refs.h"
 #include "dir.h"
 #include "packfile.h"
@@ -167,6 +169,12 @@ static int set_recommended_config(int reconfigure)
 		{ "core.autoCRLF", "false" },
 		{ "core.safeCRLF", "false" },
 		{ "fetch.showForcedUpdates", "false" },
+#ifdef HAVE_FSMONITOR_DAEMON_BACKEND
+		/*
+		 * Enable the built-in FSMonitor on supported platforms.
+		 */
+		{ "core.fsmonitor", "true" },
+#endif
 		{ NULL, NULL },
 	};
 	int i;
@@ -234,28 +242,55 @@ static int add_or_remove_enlistment(int add)
 		       "scalar.repo", the_repository->worktree, NULL);
 }
 
+static int start_fsmonitor_daemon(void)
+{
+	assert(fsmonitor_ipc__is_supported());
+
+	if (fsmonitor_ipc__get_state() != IPC_STATE__LISTENING)
+		return run_git("fsmonitor--daemon", "start", NULL);
+
+	return 0;
+}
+
+static int stop_fsmonitor_daemon(void)
+{
+	assert(fsmonitor_ipc__is_supported());
+
+	if (fsmonitor_ipc__get_state() == IPC_STATE__LISTENING)
+		return run_git("fsmonitor--daemon", "stop", NULL);
+
+	return 0;
+}
+
 static int register_dir(void)
 {
-	int res = add_or_remove_enlistment(1);
+	if (add_or_remove_enlistment(1))
+		return error(_("could not add enlistment"));
 
-	if (!res)
-		res = set_recommended_config(0);
+	if (set_recommended_config(0))
+		return error(_("could not set recommended config"));
 
-	if (!res)
-		res = toggle_maintenance(1);
+	if (toggle_maintenance(1))
+		return error(_("could not turn on maintenance"));
 
-	return res;
+	if (fsmonitor_ipc__is_supported() && start_fsmonitor_daemon())
+		return error(_("could not start the FSMonitor daemon"));
+
+	return 0;
 }
 
 static int unregister_dir(void)
 {
 	int res = 0;
 
-	if (toggle_maintenance(0) < 0)
-		res = -1;
+	if (toggle_maintenance(0))
+		res = error(_("could not turn off maintenance"));
 
-	if (add_or_remove_enlistment(0) < 0)
-		res = -1;
+	if (add_or_remove_enlistment(0))
+		res = error(_("could not remove enlistment"));
+
+	if (fsmonitor_ipc__is_supported() && stop_fsmonitor_daemon() < 0)
+		res = error(_("could not stop the FSMonitor daemon"));
 
 	return res;
 }
